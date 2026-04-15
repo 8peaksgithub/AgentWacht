@@ -1,0 +1,20 @@
+# MCP Shield — Python Dependencies
+# Python 3.11+ required
+
+# Core Framework
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pydantic==2.10.0
+pydantic-settings==2.7.0
+
+# HTTP Client for upstream MCP connections
+httpx==0.28.0
+
+# Configuration
+pyyaml==6.0.1
+
+# Logging and Monitoring
+python-json-logger==2.0.7
+
+# Security
+python-multipart==0.0.6

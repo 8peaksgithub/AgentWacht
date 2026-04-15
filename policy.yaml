@@ -1,0 +1,203 @@
+# ==========================================================================
+# MCP Shield — Example Policy Configuration
+# ==========================================================================
+# This YAML file defines the complete security posture for the MCP gateway.
+# It governs: Upstream server connections, User identities, RBAC roles, and
+# granular Zero Trust policies for argument validation and output sanitization.
+#
+# Documentation: https://github.com/8peaksgithub/mcp-shield
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# Section 1: Upstream MCP Server Registry
+# --------------------------------------------------------------------------
+# The gateway maintains persistent connections to upstream MCP servers.
+# Each server can be accessed via SSE (HTTP) or Stdio (subprocess).
+
+upstream_servers:
+  # Example: SQLite database server
+  - name: demo_db
+    type: sse
+    url: http://localhost:8080/sse
+    description: "Demo SQLite database"
+    health_check_path: /health
+    timeout_seconds: 30
+
+  # Example: Filesystem access server
+  - name: demo_fs
+    type: stdio
+    command: uvx
+    args:
+      - mcp-server-filesystem
+      - --allowed-directory
+      - /home/workspace
+    description: "Restricted filesystem access"
+    restart_on_failure: true
+
+# --------------------------------------------------------------------------
+# Section 2: User Identity & Authentication
+# --------------------------------------------------------------------------
+# Users and their API keys. In production, integrate with OAuth2/OIDC.
+
+users:
+  - username: alice
+    api_key: shield-alice-demo-key-001
+    roles:
+      - developer
+    email: alice@example.com
+    department: engineering
+
+  - username: bob
+    api_key: shield-bob-demo-key-002
+    roles:
+      - analyst
+    email: bob@example.com
+    department: analytics
+
+  - username: charlie
+    api_key: shield-charlie-admin-key-003
+    roles:
+      - admin
+    email: charlie@example.com
+    department: operations
+
+  - username: dave
+    api_key: shield-dave-demo-key-004
+    roles:
+      - contractor
+    email: dave@external.com
+    department: external
+
+# --------------------------------------------------------------------------
+# Section 3: RBAC Role Definitions
+# --------------------------------------------------------------------------
+# Roles define which tool namespaces a user can access.
+# Use glob patterns: '*' = wildcard, '!' prefix = deny (takes precedence)
+
+roles:
+  admin:
+    description: "Full system access for administrators"
+    permissions:
+      - allow: "*"
+
+  developer:
+    description: "Access to development and filesystem tools"
+    permissions:
+      - allow: "demo_db_*"
+      - allow: "demo_fs_*"
+      - deny: "demo_db_drop*"
+
+  analyst:
+    description: "Read-only access to databases and analytics"
+    permissions:
+      - allow: "demo_db_read*"
+      - allow: "demo_db_query*"
+      - deny: "demo_db_write*"
+      - deny: "demo_db_delete*"
+
+  contractor:
+    description: "Minimal access for external contractors"
+    permissions:
+      - allow: "demo_fs_read_file"
+      - allow: "demo_fs_list_directory"
+
+# --------------------------------------------------------------------------
+# Section 4: Zero Trust Policies
+# --------------------------------------------------------------------------
+
+policies:
+  # Default permission when no rule matches
+  defaultPermission: deny
+
+  # Argument Guards: validate tool call arguments before execution
+  argument_guards:
+    # Prevent SQL injection in database queries
+    - tool_pattern: "*_db_*"
+      argument_name: "query"
+      validation_type: regex_deny
+      regex: "(?i)(DROP\\s+TABLE|DELETE\\s+FROM|TRUNCATE|ALTER\\s+TABLE|;\\s*--|UNION\\s+SELECT)"
+      case_sensitive: false
+      error_message: "SQL injection pattern detected in query argument"
+
+    # Prevent file path traversal
+    - tool_pattern: "*_fs_*"
+      argument_name: "path"
+      validation_type: regex_deny
+      regex: "(\\.\\.[\\/]|~[\\/]|\\$\\{|\\$\\()"
+      case_sensitive: true
+      error_message: "Path traversal or shell expansion detected"
+
+    # Block dangerous shell commands
+    - tool_pattern: "*_exec_*"
+      argument_name: "command"
+      validation_type: regex_deny
+      regex: "(?i)(rm\\s+-rf|chmod\\s+777|curl.*\\|.*sh|wget.*\\|.*bash|eval\\s|exec\\s)"
+      case_sensitive: false
+      error_message: "Dangerous command pattern detected"
+
+  # Output Redaction (DLP): sanitise tool output before returning to user
+  output_redaction:
+    # Credit card numbers
+    - pattern_type: credit_card
+      regex: "\\b[0-9]{4}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}[\\s-]?[0-9]{4}\\b"
+      replacement: "[CARD_REDACTED]"
+      applies_to_tools: ["*"]
+      except_roles: ["admin"]
+
+    # Social security numbers
+    - pattern_type: ssn
+      regex: "\\b[0-9]{3}-[0-9]{2}-[0-9]{4}\\b"
+      replacement: "[SSN_REDACTED]"
+      applies_to_tools: ["*"]
+
+    # Email addresses
+    - pattern_type: email
+      regex: "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b"
+      replacement: "[EMAIL_REDACTED]"
+      applies_to_tools: ["*_db_*"]
+      except_roles: ["admin", "developer"]
+
+    # Phone numbers
+    - pattern_type: phone
+      regex: "\\b(\\+?1?[\\s.-]?)?\\(?[0-9]{3}\\)?[\\s.-]?[0-9]{3}[\\s.-]?[0-9]{4}\\b"
+      replacement: "[PHONE_REDACTED]"
+      applies_to_tools: ["*_db_*"]
+      except_roles: ["admin"]
+
+    # API keys / tokens
+    - pattern_type: api_key
+      regex: "\\b(sk-|pk-|ghp_|gho_|github_pat_)[A-Za-z0-9_-]{20,}\\b"
+      replacement: "[API_KEY_REDACTED]"
+      applies_to_tools: ["*"]
+
+    # AWS credentials
+    - pattern_type: aws_creds
+      regex: "\\b(AKIA|ASIA)[A-Z0-9]{16}\\b"
+      replacement: "[AWS_KEY_REDACTED]"
+      applies_to_tools: ["*"]
+
+# --------------------------------------------------------------------------
+# Section 5: Gateway Settings
+# --------------------------------------------------------------------------
+
+gateway_settings:
+  # Tool namespacing separator
+  namespace_separator: "_"
+
+  # Rate limiting
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+    burst_limit: 10
+
+  # Audit logging
+  audit_log:
+    enabled: true
+    file_path: "./mcp_shield_audit.jsonl"
+    retention_days: 90
+    include_args_hash: true
+
+  # Session settings
+  session:
+    timeout_minutes: 30
+    max_concurrent: 100

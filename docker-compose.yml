@@ -1,0 +1,33 @@
+# MCP Shield — Docker Compose
+# Usage:
+#   docker compose up -d              # Start in background
+#   docker compose logs -f gateway    # View logs
+#   docker compose down               # Stop and remove
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-shield
+    ports:
+      - "${GATEWAY_PORT:-8000}:8000"
+    environment:
+      - GATEWAY_PORT=8000
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_CONFIG=/app/policy.yaml
+    volumes:
+      - ./policy.yaml:/app/policy.yaml:ro
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health').raise_for_status()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
