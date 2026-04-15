@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP Shield - Test Suite
+AgentWacht - Test Suite
 =================================
 Quick smoke tests to verify the gateway is working correctly.
 
@@ -254,14 +254,14 @@ def load_test_config() -> Dict[str, Any]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Test MCP Shield")
+    parser = argparse.ArgumentParser(description="Test AgentWacht")
     parser.add_argument("--host", default="localhost", help="Gateway host")
     parser.add_argument("--port", type=int, default=8000, help="Gateway port")
     args = parser.parse_args()
     
     base_url = f"http://{args.host}:{args.port}"
     
-    print(f"{Colors.BOLD}MCP Shield - Test Suite{Colors.RESET}")
+    print(f"{Colors.BOLD}AgentWacht - Test Suite{Colors.RESET}")
     print(f"Target: {base_url}")
     print("=" * 60)
     

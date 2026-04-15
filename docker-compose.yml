@@ -1,4 +1,4 @@
-# MCP Shield — Docker Compose
+# AgentWacht — Docker Compose
 # Usage:
 #   docker compose up -d              # Start in background
 #   docker compose logs -f gateway    # View logs
@@ -9,7 +9,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: mcp-shield
+    container_name: agentwacht
     ports:
       - "${GATEWAY_PORT:-8000}:8000"
     environment:

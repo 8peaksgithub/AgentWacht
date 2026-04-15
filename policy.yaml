@@ -1,11 +1,11 @@
 # ==========================================================================
-# MCP Shield — Example Policy Configuration
+# AgentWacht — Example Policy Configuration
 # ==========================================================================
 # This YAML file defines the complete security posture for the MCP gateway.
 # It governs: Upstream server connections, User identities, RBAC roles, and
 # granular Zero Trust policies for argument validation and output sanitization.
 #
-# Documentation: https://github.com/8peaksgithub/mcp-shield
+# Documentation: https://github.com/8peaksgithub/agentwacht
 # ==========================================================================
 
 # --------------------------------------------------------------------------
@@ -193,7 +193,7 @@ gateway_settings:
   # Audit logging
   audit_log:
     enabled: true
-    file_path: "./mcp_shield_audit.jsonl"
+    file_path: "./agentwacht_audit.jsonl"
     retention_days: 90
     include_args_hash: true
 

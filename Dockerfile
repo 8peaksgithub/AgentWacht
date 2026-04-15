@@ -1,4 +1,4 @@
-# MCP Shield
+# AgentWacht
 # Zero Trust proxy for the Model Context Protocol (MCP)
 
 FROM python:3.11-slim

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-MCP Shield - Launcher
+AgentWacht - Launcher
 =====================
-Simple launcher script for the MCP Shield gateway.
+Simple launcher script for the AgentWacht gateway.
 
 Usage:
     python run_gateway.py [--config path/to/policy.yaml] [--port 8000]
@@ -37,7 +37,7 @@ import uvicorn
 def parse_args():
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="MCP Shield — Zero Trust Proxy for the Model Context Protocol",
+        description="AgentWacht — Zero Trust Proxy for the Model Context Protocol",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -132,11 +132,11 @@ def main():
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    logger = logging.getLogger("mcp_shield")
+    logger = logging.getLogger("agentwacht")
 
     logger.info("=" * 60)
-    logger.info("MCP Shield — Zero Trust Proxy for MCP")
-    logger.info("https://github.com/8peaksgithub/mcp-shield")
+    logger.info("AgentWacht — Zero Trust Proxy for MCP")
+    logger.info("https://github.com/8peaksgithub/agentwacht")
     logger.info("=" * 60)
 
     logger.info("Loading configuration from: %s", args.config)

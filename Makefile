@@ -1,9 +1,9 @@
-# MCP Shield — Makefile
+# AgentWacht — Makefile
 
 .PHONY: help install test run dev docker-build docker-run docker-stop docker-logs clean health
 
 help:
-	@echo "MCP Shield — Available Commands:"
+	@echo "AgentWacht — Available Commands:"
 	@echo ""
 	@echo "  make install       Install Python dependencies"
 	@echo "  make test          Run test suite"
@@ -30,7 +30,7 @@ dev:
 	python run_gateway.py --reload --log-level debug
 
 docker-build:
-	docker build -t mcp-shield:latest .
+	docker build -t agentwacht:latest .
 
 docker-run:
 	docker compose up -d

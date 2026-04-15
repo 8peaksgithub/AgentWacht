@@ -1,4 +1,4 @@
-# MCP Shield — Python Dependencies
+# AgentWacht — Python Dependencies
 # Python 3.11+ required
 
 # Core Framework

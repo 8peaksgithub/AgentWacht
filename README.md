@@ -1,5 +1,5 @@
 <p align="center">
-  <h1 align="center">🛡️ MCP Shield</h1>
+  <h1 align="center">🛡️ AgentWacht</h1>
   <p align="center"><strong>Zero Trust proxy for the Model Context Protocol</strong></p>
   <p align="center">
     <a href="#quickstart">Quickstart</a> •
@@ -12,9 +12,9 @@
 
 ---
 
-**MCP Shield** is an open-source security gateway that sits between AI agents and the tools they access via [MCP (Model Context Protocol)](https://modelcontextprotocol.io). It enforces Zero Trust policies on every tool call — authentication, RBAC, argument validation, output redaction, and full audit logging.
+**AgentWacht** is an open-source security gateway that sits between AI agents and the tools they access via [MCP (Model Context Protocol)](https://modelcontextprotocol.io). It enforces Zero Trust policies on every tool call — authentication, RBAC, argument validation, output redaction, and full audit logging.
 
-> **Why?** Multi-agent AI systems create N² attack paths. Every agent can call every tool, pass untrusted arguments, and leak sensitive data. MCP Shield gives you a single enforcement point with policy-as-code.
+> **Why?** Multi-agent AI systems create N² attack paths. Every agent can call every tool, pass untrusted arguments, and leak sensitive data. AgentWacht gives you a single enforcement point with policy-as-code.
 
 ## Features
 
@@ -35,8 +35,8 @@
 ### Option 1: Python
 
 ```bash
-git clone https://github.com/8peaksgithub/mcp-shield.git
-cd mcp-shield
+git clone https://github.com/8peaksgithub/agentwacht.git
+cd agentwacht
 pip install -r requirements.txt
 python run_gateway.py
 ```
@@ -46,8 +46,8 @@ The gateway starts on `http://localhost:8000`. Open `http://localhost:8000/admin
 ### Option 2: Docker
 
 ```bash
-git clone https://github.com/8peaksgithub/mcp-shield.git
-cd mcp-shield
+git clone https://github.com/8peaksgithub/agentwacht.git
+cd agentwacht
 docker compose up -d
 ```
 
@@ -64,7 +64,7 @@ make dev  # auto-reload mode
 
 ```
 ┌─────────────────┐     ┌──────────────────────────────────┐     ┌──────────────┐
-│   AI Workflows   │     │         MCP Shield               │     │  MCP Servers  │
+│   AI Workflows   │     │         AgentWacht               │     │  MCP Servers  │
 │                  │     │                                  │     │              │
 │  Chatbots        │────▶│  1. Authentication               │────▶│  Databases   │
 │  Code Agents     │     │  2. RBAC Check                   │     │  File System │
@@ -192,7 +192,7 @@ The test suite covers: health check, MCP initialize/tools flow, RBAC enforcement
 
 ## EU AI Act Compliance
 
-MCP Shield helps organisations meet EU AI Act requirements for high-risk AI systems:
+AgentWacht helps organisations meet EU AI Act requirements for high-risk AI systems:
 
 - **Article 9 (Risk Management)**: Argument validation prevents dangerous tool calls
 - **Article 12 (Record-Keeping)**: Immutable audit trail with 90-day retention

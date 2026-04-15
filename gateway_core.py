@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MCP Shield - Core Engine
+AgentWacht - Core Engine
 =============================================
 A production-grade, Zero Trust proxy for the Model Context Protocol.
 
@@ -33,7 +33,7 @@ from typing import Any, Optional
 import httpx
 import yaml
 from fastapi import FastAPI, HTTPException, Header, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 MCP_PROTOCOL_VERSION = "2025-11-25"
@@ -144,18 +144,45 @@ def load_config(config_path: str = "policy.yaml") -> GatewayConfig:
         data_str = data_str.replace(match.group(0), env_val)
     data = json.loads(data_str)
 
-    return GatewayConfig(**data)
+    cfg = GatewayConfig(**data)
+
+    # ── Community Edition limits ──
+    # Max 2 roles (admin + one custom). Enterprise removes this limit.
+    MAX_COMMUNITY_ROLES = 2
+    if len(cfg.roles) > MAX_COMMUNITY_ROLES:
+        allowed = dict(list(cfg.roles.items())[:MAX_COMMUNITY_ROLES])
+        logging.warning(
+            "Community edition: only %d roles allowed (loaded %d, keeping: %s). "
+            "Upgrade to Enterprise for unlimited roles.",
+            MAX_COMMUNITY_ROLES, len(cfg.roles), list(allowed.keys()),
+        )
+        cfg.roles = allowed
+
+    # Community DLP: only credit_card pattern.
+    COMMUNITY_DLP_PATTERNS = {"credit_card"}
+    raw_rules = cfg.policies.get("output_redaction", [])
+    if raw_rules:
+        filtered = [r for r in raw_rules if r.get("pattern_type") in COMMUNITY_DLP_PATTERNS]
+        if len(filtered) < len(raw_rules):
+            logging.warning(
+                "Community edition: DLP limited to %s patterns. "
+                "Upgrade to Enterprise for full PII redaction (SSN, email, phone, API keys, cloud creds).",
+                COMMUNITY_DLP_PATTERNS,
+            )
+        cfg.policies["output_redaction"] = filtered
+
+    return cfg
 
 
 # ---------------------------------------------------------------------------
 # Audit Logging
 # ---------------------------------------------------------------------------
 
-def setup_audit_logger(log_path: str = "./mcp_shield_audit.jsonl") -> logging.Logger:
+def setup_audit_logger(log_path: str = "./agentwacht_audit.jsonl") -> logging.Logger:
     log_dir = Path(log_path).parent
     log_dir.mkdir(parents=True, exist_ok=True)
 
-    logger = logging.getLogger("mcp_shield_audit")
+    logger = logging.getLogger("agentwacht_audit")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
         handler = logging.FileHandler(log_path, mode="a")
@@ -483,7 +510,7 @@ def handle_initialize(req_id: Any, params: dict, session_id: str) -> dict:
             "prompts": {"listChanged": False},
         },
         "serverInfo": {
-            "name": "MCP Shield",
+            "name": "AgentWacht",
             "version": GATEWAY_VERSION,
         },
     })
@@ -532,12 +559,6 @@ def _builtin_tools(user: User) -> list[dict]:
             },
         },
     ]
-    if "admin" in user.roles:
-        tools.append({
-            "name": "gateway_refresh_upstreams",
-            "description": "Re-discover all upstream MCP server tools.",
-            "inputSchema": {"type": "object", "properties": {}},
-        })
     return tools
 
 
@@ -560,14 +581,6 @@ async def handle_tools_call(
         latency = (time.time() - start) * 1000
         log_audit_event(user.username, "tools/call", tool_name, arguments, "SUCCESS", latency, session_id=session_id)
         return jsonrpc_response(req_id, {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]})
-
-    if tool_name == "gateway_refresh_upstreams":
-        if "admin" not in user.roles:
-            return jsonrpc_error(req_id, -32001, "Admin role required")
-        await discover_all_upstreams()
-        latency = (time.time() - start) * 1000
-        log_audit_event(user.username, "tools/call", tool_name, arguments, "SUCCESS", latency, session_id=session_id)
-        return jsonrpc_response(req_id, {"content": [{"type": "text", "text": "Upstream discovery complete"}]})
 
     # RBAC
     if not user_can_access(user, tool_name):
@@ -639,7 +652,7 @@ def _tool_gateway_health() -> dict:
 
 def _tool_audit_summary(limit: int = 10) -> dict:
     audit_path = config.gateway_settings.get("audit_log", {}).get(
-        "file_path", "./mcp_shield_audit.jsonl"
+        "file_path", "./agentwacht_audit.jsonl"
     )
     try:
         lines = Path(audit_path).read_text().strip().split("\n")
@@ -662,12 +675,12 @@ async def lifespan(app: FastAPI):
     logging.info("Loaded config: %d upstreams, %d users", len(config.upstream_servers), len(config.users))
 
     audit_path = config.gateway_settings.get("audit_log", {}).get(
-        "file_path", "./mcp_shield_audit.jsonl"
+        "file_path", "./agentwacht_audit.jsonl"
     )
     audit_logger = setup_audit_logger(audit_path)
 
     await discover_all_upstreams()
-    logging.info("MCP Shield v%s started", GATEWAY_VERSION)
+    logging.info("AgentWacht v%s started", GATEWAY_VERSION)
 
     yield
 
@@ -676,7 +689,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="MCP Shield",
+    title="AgentWacht",
     description="Zero Trust proxy for Model Context Protocol",
     version=GATEWAY_VERSION,
     lifespan=lifespan,
@@ -875,604 +888,19 @@ async def legacy_tools_call(
 @app.get("/")
 async def root():
     return {
-        "service": "MCP Shield",
+        "service": "AgentWacht",
         "version": GATEWAY_VERSION,
         "protocol_version": MCP_PROTOCOL_VERSION,
         "endpoints": {
             "mcp": "POST /mcp (Streamable HTTP)",
             "mcp_sse": "GET /mcp (SSE listen)",
             "health": "GET /health",
-            "admin": "GET /admin (Dashboard)",
             "legacy_list": "POST /tools/list",
             "legacy_call": "POST /tools/call",
         },
+        "edition": "community",
         "security": "Zero Trust RBAC + DLP + Argument Validation",
         "upstream_servers": len(config.upstream_servers) if config else 0,
         "total_tools": len(tool_registry),
     }
 
-
-# ---------------------------------------------------------------------------
-# Admin helpers
-# ---------------------------------------------------------------------------
-
-def _require_admin(api_key: Optional[str], request: Request) -> User:
-    key = _extract_api_key(request, api_key)
-    if not key:
-        raise HTTPException(status_code=401, detail="Admin API key required")
-    user = get_user(key)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    if "admin" not in user.roles:
-        raise HTTPException(status_code=403, detail="Admin role required")
-    return user
-
-
-def _save_config():
-    raw = config.model_dump()
-    with open(config_path_global, "w") as f:
-        yaml.dump(raw, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
-
-
-async def _reload_config():
-    global config, user_cache
-    config = load_config(config_path_global)
-    user_cache.clear()
-    await discover_all_upstreams()
-    logging.info("Config reloaded: %d upstreams, %d users", len(config.upstream_servers), len(config.users))
-
-
-# ---------------------------------------------------------------------------
-# Admin API
-# ---------------------------------------------------------------------------
-
-@app.get("/admin/api/overview")
-async def admin_overview(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    return {
-        "version": GATEWAY_VERSION,
-        "protocol_version": MCP_PROTOCOL_VERSION,
-        "upstreams": [
-            {
-                "name": s.name,
-                "type": s.type,
-                "url": s.url or "(stdio)",
-                "description": s.description,
-                "status": upstream_status.get(s.name, "unknown"),
-                "tools": len(upstream_tools.get(s.name, [])),
-                "timeout_seconds": s.timeout_seconds,
-            }
-            for s in config.upstream_servers
-        ],
-        "users": [
-            {
-                "username": u.username,
-                "roles": u.roles,
-                "email": u.email,
-                "department": u.department,
-                "api_key_preview": u.api_key[:8] + "..." if len(u.api_key) > 8 else "***",
-            }
-            for u in config.users
-        ],
-        "roles": {
-            name: {"description": role.description, "permissions": [p.model_dump() for p in role.permissions]}
-            for name, role in config.roles.items()
-        },
-        "sessions": len(mcp_sessions),
-        "total_tools": len(tool_registry),
-        "rate_limit": config.gateway_settings.get("rate_limit", {}),
-        "policies": {
-            "argument_guards": len(config.policies.get("argument_guards", [])),
-            "output_redaction": len(config.policies.get("output_redaction", [])),
-        },
-    }
-
-
-@app.get("/admin/api/upstreams")
-async def admin_list_upstreams(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    return [
-        {
-            **s.model_dump(),
-            "status": upstream_status.get(s.name, "unknown"),
-            "discovered_tools": [
-                {"name": t.get("name"), "description": t.get("description", "")}
-                for t in upstream_tools.get(s.name, [])
-            ],
-        }
-        for s in config.upstream_servers
-    ]
-
-
-@app.post("/admin/api/upstreams")
-async def admin_add_upstream(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    body = await request.json()
-    new_server = UpstreamServer(**body)
-    if any(s.name == new_server.name for s in config.upstream_servers):
-        raise HTTPException(status_code=409, detail=f"Upstream '{new_server.name}' already exists")
-    config.upstream_servers.append(new_server)
-    _save_config()
-    await discover_upstream(new_server)
-    return {"status": "created", "name": new_server.name}
-
-
-@app.put("/admin/api/upstreams/{name}")
-async def admin_update_upstream(
-    name: str,
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    body = await request.json()
-    for i, s in enumerate(config.upstream_servers):
-        if s.name == name:
-            updated = UpstreamServer(**{**s.model_dump(), **body, "name": name})
-            config.upstream_servers[i] = updated
-            _save_config()
-            await discover_upstream(updated)
-            return {"status": "updated", "name": name}
-    raise HTTPException(status_code=404, detail=f"Upstream '{name}' not found")
-
-
-@app.delete("/admin/api/upstreams/{name}")
-async def admin_delete_upstream(
-    name: str,
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    original_len = len(config.upstream_servers)
-    config.upstream_servers = [s for s in config.upstream_servers if s.name != name]
-    if len(config.upstream_servers) == original_len:
-        raise HTTPException(status_code=404, detail=f"Upstream '{name}' not found")
-    upstream_tools.pop(name, None)
-    upstream_status.pop(name, None)
-    tool_registry_clean = {k: v for k, v in tool_registry.items() if v[0] != name}
-    tool_registry.clear()
-    tool_registry.update(tool_registry_clean)
-    _save_config()
-    return {"status": "deleted", "name": name}
-
-
-@app.get("/admin/api/users")
-async def admin_list_users(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    return [
-        {
-            "username": u.username,
-            "roles": u.roles,
-            "email": u.email,
-            "department": u.department,
-            "api_key_preview": u.api_key[:8] + "..." if len(u.api_key) > 8 else "***",
-        }
-        for u in config.users
-    ]
-
-
-@app.post("/admin/api/users")
-async def admin_add_user(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    body = await request.json()
-    if "api_key" not in body or not body["api_key"]:
-        body["api_key"] = f"shield-{body.get('username', 'user')}-{secrets.token_hex(12)}"
-    new_user = User(**body)
-    if any(u.username == new_user.username for u in config.users):
-        raise HTTPException(status_code=409, detail=f"User '{new_user.username}' already exists")
-    config.users.append(new_user)
-    user_cache.clear()
-    _save_config()
-    return {"status": "created", "username": new_user.username, "api_key": new_user.api_key}
-
-
-@app.delete("/admin/api/users/{username}")
-async def admin_delete_user(
-    username: str,
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    original_len = len(config.users)
-    config.users = [u for u in config.users if u.username != username]
-    if len(config.users) == original_len:
-        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
-    user_cache.clear()
-    _save_config()
-    return {"status": "deleted", "username": username}
-
-
-@app.get("/admin/api/audit")
-async def admin_audit_log(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-    limit: int = 50,
-):
-    _require_admin(x_api_key, request)
-    return _tool_audit_summary(limit)
-
-
-@app.get("/admin/api/sessions")
-async def admin_sessions(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    return {
-        "active": len(mcp_sessions),
-        "sessions": [
-            {
-                "id": sid[:12] + "...",
-                "client": s.get("client_info", {}).get("name", "unknown"),
-                "initialized": s.get("initialized", False),
-                "created_at": s.get("created_at", ""),
-            }
-            for sid, s in mcp_sessions.items()
-        ],
-    }
-
-
-@app.post("/admin/api/reload")
-async def admin_reload(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    await _reload_config()
-    return {
-        "status": "reloaded",
-        "upstreams": len(config.upstream_servers),
-        "users": len(config.users),
-        "tools": len(tool_registry),
-    }
-
-
-@app.post("/admin/api/upstreams/rediscover")
-async def admin_rediscover(
-    request: Request,
-    x_api_key: Optional[str] = Header(None, alias="X-API-Key"),
-):
-    _require_admin(x_api_key, request)
-    await discover_all_upstreams()
-    return {
-        "status": "discovery_complete",
-        "upstreams": {
-            name: {"status": upstream_status.get(name, "unknown"), "tools": len(tools)}
-            for name, tools in upstream_tools.items()
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# Admin Dashboard
-# ---------------------------------------------------------------------------
-
-ADMIN_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MCP Shield</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0a0e17;--surface:#111827;--surface2:#1e293b;--border:#334155;--text:#e2e8f0;--text2:#94a3b8;--accent:#3b82f6;--accent2:#60a5fa;--green:#22c55e;--red:#ef4444;--orange:#f59e0b;--purple:#a78bfa}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
-.login{display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:16px}
-.login h1{font-size:24px;color:var(--accent2)}
-.login input{padding:12px 16px;border-radius:8px;border:1px solid var(--border);background:var(--surface);color:var(--text);width:320px;font-size:14px;outline:none}
-.login input:focus{border-color:var(--accent)}
-.login button{padding:12px 32px;border-radius:8px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-size:14px;font-weight:600}
-.login button:hover{background:var(--accent2)}
-.login .error{color:var(--red);font-size:13px}
-.app{display:none}
-header{background:var(--surface);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;justify-content:space-between}
-header h1{font-size:18px;font-weight:600}
-header h1 span{color:var(--accent2);font-weight:400;font-size:14px;margin-left:8px}
-header .actions{display:flex;gap:8px;align-items:center}
-.user-badge{background:var(--surface2);padding:4px 12px;border-radius:20px;font-size:12px;color:var(--accent2)}
-.btn{padding:6px 14px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);cursor:pointer;font-size:12px;display:inline-flex;align-items:center;gap:4px}
-.btn:hover{border-color:var(--accent)}
-.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn-primary:hover{background:var(--accent2)}
-.btn-danger{border-color:var(--red);color:var(--red)}
-.btn-danger:hover{background:var(--red);color:#fff}
-nav{background:var(--surface);border-bottom:1px solid var(--border);padding:0 24px;display:flex;gap:0}
-nav button{padding:10px 20px;border:none;background:none;color:var(--text2);cursor:pointer;font-size:13px;border-bottom:2px solid transparent;transition:all .2s}
-nav button:hover{color:var(--text)}
-nav button.active{color:var(--accent2);border-bottom-color:var(--accent2)}
-main{padding:24px;max-width:1200px;margin:0 auto}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin-bottom:24px}
-.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:20px}
-.card .label{font-size:12px;color:var(--text2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
-.card .value{font-size:28px;font-weight:700}
-.card .sub{font-size:12px;color:var(--text2);margin-top:4px}
-.status{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
-.status.healthy,.status.connected{background:var(--green)}
-.status.disconnected,.status.unhealthy{background:var(--red)}
-.status.skipped,.status.unknown{background:var(--orange)}
-table{width:100%;border-collapse:collapse;font-size:13px}
-table th{text-align:left;padding:10px 12px;background:var(--surface2);color:var(--text2);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--border)}
-table td{padding:10px 12px;border-bottom:1px solid var(--border)}
-table tr:hover{background:var(--surface2)}
-.section{margin-bottom:32px}
-.section-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
-.section h2{font-size:16px;font-weight:600}
-.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-right:4px}
-.tag-admin{background:#7c3aed22;color:var(--purple)}
-.tag-developer{background:#3b82f622;color:var(--accent2)}
-.tag-analyst{background:#22c55e22;color:var(--green)}
-.tag-contractor{background:#f59e0b22;color:var(--orange)}
-.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
-.modal-bg.open{display:flex}
-.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:480px;max-width:90vw;max-height:80vh;overflow-y:auto}
-.modal h3{margin-bottom:16px;font-size:16px}
-.form-group{margin-bottom:12px}
-.form-group label{display:block;font-size:12px;color:var(--text2);margin-bottom:4px}
-.form-group input,.form-group select{width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:13px;outline:none}
-.form-group input:focus,.form-group select:focus{border-color:var(--accent)}
-.form-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
-.toast{position:fixed;bottom:24px;right:24px;padding:12px 20px;border-radius:8px;font-size:13px;z-index:200;animation:slideIn .3s ease}
-.toast-success{background:#22c55e;color:#fff}
-.toast-error{background:#ef4444;color:#fff}
-@keyframes slideIn{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
-.audit-entry{font-family:'SF Mono',Monaco,monospace;font-size:12px;padding:6px 0;border-bottom:1px solid var(--border)}
-.audit-entry .ts{color:var(--text2)}
-.audit-entry .user{color:var(--accent2)}
-.audit-entry .method{color:var(--purple)}
-.audit-entry .verdict-SUCCESS{color:var(--green)}
-.audit-entry .verdict-PERMISSION_DENIED,.verdict-AUTH_FAILED,.verdict-RATE_LIMITED{color:var(--red)}
-.empty{text-align:center;padding:40px;color:var(--text2)}
-</style>
-</head>
-<body>
-
-<div class="login" id="login">
-  <h1>MCP Shield</h1>
-  <input type="password" id="apiKeyInput" placeholder="Admin API Key" autofocus>
-  <button onclick="doLogin()">Sign In</button>
-  <div class="error" id="loginError"></div>
-</div>
-
-<div class="app" id="app">
-  <header>
-    <h1>MCP Gateway <span id="versionBadge"></span></h1>
-    <div class="actions">
-      <span class="user-badge" id="userBadge"></span>
-      <button class="btn" onclick="reloadConfig()">Reload Config</button>
-      <button class="btn" onclick="rediscover()">Rediscover</button>
-      <button class="btn btn-danger" onclick="logout()">Logout</button>
-    </div>
-  </header>
-  <nav>
-    <button class="active" onclick="showTab(this,'overview')">Overview</button>
-    <button onclick="showTab(this,'upstreams')">Upstreams</button>
-    <button onclick="showTab(this,'users')">Users</button>
-    <button onclick="showTab(this,'roles')">Roles &amp; Policies</button>
-    <button onclick="showTab(this,'audit')">Audit Log</button>
-    <button onclick="showTab(this,'sessions')">Sessions</button>
-  </nav>
-  <main>
-    <div id="tab-overview"></div>
-    <div id="tab-upstreams" style="display:none"></div>
-    <div id="tab-users" style="display:none"></div>
-    <div id="tab-roles" style="display:none"></div>
-    <div id="tab-audit" style="display:none"></div>
-    <div id="tab-sessions" style="display:none"></div>
-  </main>
-</div>
-
-<div class="modal-bg" id="modalBg" onclick="if(event.target===this)closeModal()">
-  <div class="modal" id="modalContent"></div>
-</div>
-
-<script>
-let API_KEY='';
-let DATA={};
-
-function api(path,opts={}){
-  return fetch('/admin/api/'+path,{
-    ...opts,
-    headers:{'X-API-Key':API_KEY,'Content-Type':'application/json',...(opts.headers||{})},
-    body:opts.body?JSON.stringify(opts.body):undefined
-  }).then(r=>{if(!r.ok)throw r;return r.json()});
-}
-
-function toast(msg,type='success'){
-  const d=document.createElement('div');
-  d.className='toast toast-'+type;
-  d.textContent=msg;
-  document.body.appendChild(d);
-  setTimeout(()=>d.remove(),3000);
-}
-
-function showTab(btn,id){
-  document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
-  document.querySelectorAll('main>div').forEach(d=>d.style.display='none');
-  document.getElementById('tab-'+id).style.display='block';
-  if(id==='audit')loadAudit();
-  if(id==='sessions')loadSessions();
-}
-
-async function doLogin(){
-  API_KEY=document.getElementById('apiKeyInput').value.trim();
-  if(!API_KEY)return;
-  try{
-    DATA=await api('overview');
-    document.getElementById('login').style.display='none';
-    document.getElementById('app').style.display='block';
-    render();
-  }catch(e){
-    document.getElementById('loginError').textContent='Invalid admin key';
-  }
-}
-document.getElementById('apiKeyInput').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin()});
-
-function logout(){API_KEY='';document.getElementById('app').style.display='none';document.getElementById('login').style.display='flex';document.getElementById('apiKeyInput').value='';}
-
-async function refresh(){DATA=await api('overview');render();}
-
-function render(){
-  document.getElementById('versionBadge').textContent='v'+DATA.version+' • MCP '+DATA.protocol_version;
-  const admin=DATA.users.find(u=>u.roles.includes('admin'));
-  document.getElementById('userBadge').textContent=admin?admin.username:'admin';
-  renderOverview();renderUpstreams();renderUsers();renderRoles();
-}
-
-function renderOverview(){
-  const u=DATA.upstreams;
-  const connected=u.filter(x=>x.status==='connected').length;
-  const totalTools=DATA.total_tools;
-  document.getElementById('tab-overview').innerHTML=`
-    <div class="grid">
-      <div class="card"><div class="label">Upstreams</div><div class="value">${u.length}</div><div class="sub">${connected} connected</div></div>
-      <div class="card"><div class="label">Total Tools</div><div class="value">${totalTools}</div><div class="sub">Across all upstreams</div></div>
-      <div class="card"><div class="label">Users</div><div class="value">${DATA.users.length}</div><div class="sub">${Object.keys(DATA.roles).length} roles</div></div>
-      <div class="card"><div class="label">Active Sessions</div><div class="value">${DATA.sessions}</div><div class="sub">MCP clients connected</div></div>
-      <div class="card"><div class="label">Rate Limit</div><div class="value">${DATA.rate_limit.requests_per_minute||'--'}/min</div><div class="sub">${DATA.rate_limit.enabled?'Enabled':'Disabled'}</div></div>
-      <div class="card"><div class="label">Policies</div><div class="value">${DATA.policies.argument_guards+DATA.policies.output_redaction}</div><div class="sub">${DATA.policies.argument_guards} guards, ${DATA.policies.output_redaction} DLP rules</div></div>
-    </div>
-    <div class="section"><h2>Upstream Status</h2>
-    <table><tr><th>Name</th><th>Type</th><th>URL</th><th>Status</th><th>Tools</th><th>Timeout</th></tr>
-    ${u.map(s=>`<tr><td><strong>${s.name}</strong><br><span style="color:var(--text2);font-size:11px">${s.description||''}</span></td><td>${s.type}</td><td style="font-family:monospace;font-size:12px">${s.url}</td><td><span class="status ${s.status}"></span>${s.status}</td><td>${s.tools}</td><td>${s.timeout_seconds}s</td></tr>`).join('')}
-    </table></div>`;
-}
-
-function renderUpstreams(){
-  const u=DATA.upstreams;
-  document.getElementById('tab-upstreams').innerHTML=`
-    <div class="section"><div class="section-header"><h2>Upstream Servers</h2><button class="btn btn-primary" onclick="showAddUpstream()">+ Add Upstream</button></div>
-    <table><tr><th>Name</th><th>Type</th><th>URL</th><th>Status</th><th>Tools</th><th>Actions</th></tr>
-    ${u.map(s=>`<tr><td><strong>${s.name}</strong></td><td>${s.type}</td><td style="font-family:monospace;font-size:12px">${s.url}</td><td><span class="status ${s.status}"></span>${s.status}</td><td>${s.tools}</td>
-    <td><button class="btn btn-danger" onclick="deleteUpstream('${s.name}')">Delete</button></td></tr>`).join('')}
-    </table></div>`;
-}
-
-function showAddUpstream(){
-  document.getElementById('modalContent').innerHTML=`
-    <h3>Add Upstream Server</h3>
-    <div class="form-group"><label>Name</label><input id="f-name" placeholder="my_server"></div>
-    <div class="form-group"><label>Type</label><select id="f-type"><option value="sse">SSE (HTTP)</option><option value="stdio">Stdio</option></select></div>
-    <div class="form-group"><label>URL</label><input id="f-url" placeholder="http://localhost:8080/sse"></div>
-    <div class="form-group"><label>Description</label><input id="f-desc" placeholder="What this server does"></div>
-    <div class="form-group"><label>Timeout (seconds)</label><input id="f-timeout" type="number" value="30"></div>
-    <div class="form-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitUpstream()">Add</button></div>`;
-  openModal();
-}
-
-async function submitUpstream(){
-  const body={name:g('f-name'),type:g('f-type'),url:g('f-url')||null,description:g('f-desc'),timeout_seconds:parseInt(g('f-timeout'))||30};
-  try{await api('upstreams',{method:'POST',body});toast('Upstream added');closeModal();await refresh();}catch(e){toast('Failed: '+(await e.text?.()|| 'error'),'error');}
-}
-
-async function deleteUpstream(name){
-  if(!confirm('Delete upstream "'+name+'"?'))return;
-  try{await api('upstreams/'+name,{method:'DELETE'});toast('Upstream deleted');await refresh();}catch(e){toast('Failed','error');}
-}
-
-function renderUsers(){
-  document.getElementById('tab-users').innerHTML=`
-    <div class="section"><div class="section-header"><h2>Users</h2><button class="btn btn-primary" onclick="showAddUser()">+ Add User</button></div>
-    <table><tr><th>Username</th><th>Roles</th><th>Email</th><th>Department</th><th>API Key</th><th>Actions</th></tr>
-    ${DATA.users.map(u=>`<tr><td><strong>${u.username}</strong></td><td>${u.roles.map(r=>'<span class="tag tag-'+r+'">'+r+'</span>').join('')}</td><td>${u.email}</td><td>${u.department}</td><td style="font-family:monospace;font-size:12px">${u.api_key_preview}</td>
-    <td><button class="btn btn-danger" onclick="deleteUser('${u.username}')">Delete</button></td></tr>`).join('')}
-    </table></div>`;
-}
-
-function showAddUser(){
-  const roles=Object.keys(DATA.roles);
-  document.getElementById('modalContent').innerHTML=`
-    <h3>Add User</h3>
-    <div class="form-group"><label>Username</label><input id="f-username" placeholder="johndoe"></div>
-    <div class="form-group"><label>Email</label><input id="f-email" placeholder="john@mcp_shield.com"></div>
-    <div class="form-group"><label>Department</label><input id="f-dept" placeholder="engineering"></div>
-    <div class="form-group"><label>Role</label><select id="f-role">${roles.map(r=>'<option value="'+r+'">'+r+'</option>').join('')}</select></div>
-    <div class="form-group"><label>API Key (leave blank to auto-generate)</label><input id="f-apikey" placeholder="auto-generated"></div>
-    <div class="form-actions"><button class="btn" onclick="closeModal()">Cancel</button><button class="btn btn-primary" onclick="submitUser()">Add</button></div>`;
-  openModal();
-}
-
-async function submitUser(){
-  const body={username:g('f-username'),email:g('f-email'),department:g('f-dept'),roles:[g('f-role')],api_key:g('f-apikey')||undefined};
-  try{const r=await api('users',{method:'POST',body});toast('User created. Key: '+r.api_key);closeModal();await refresh();}catch(e){toast('Failed','error');}
-}
-
-async function deleteUser(name){
-  if(!confirm('Delete user "'+name+'"?'))return;
-  try{await api('users/'+name,{method:'DELETE'});toast('User deleted');await refresh();}catch(e){toast('Failed','error');}
-}
-
-function renderRoles(){
-  const roles=DATA.roles;
-  document.getElementById('tab-roles').innerHTML=`
-    <div class="section"><h2>Roles</h2>
-    <table><tr><th>Role</th><th>Description</th><th>Allow</th><th>Deny</th></tr>
-    ${Object.entries(roles).map(([name,r])=>{
-      const allows=r.permissions.filter(p=>p.allow).map(p=>'<code>'+p.allow+'</code>').join(', ')||'—';
-      const denies=r.permissions.filter(p=>p.deny).map(p=>'<code>'+p.deny+'</code>').join(', ')||'—';
-      return `<tr><td><span class="tag tag-${name}">${name}</span></td><td>${r.description}</td><td>${allows}</td><td style="color:var(--red)">${denies}</td></tr>`;
-    }).join('')}
-    </table></div>
-    <div class="section"><h2>Security Policies</h2>
-    <div class="grid">
-      <div class="card"><div class="label">Argument Guards</div><div class="value">${DATA.policies.argument_guards}</div><div class="sub">Input validation rules</div></div>
-      <div class="card"><div class="label">DLP Rules</div><div class="value">${DATA.policies.output_redaction}</div><div class="sub">Output redaction patterns</div></div>
-    </div></div>`;
-}
-
-async function loadAudit(){
-  try{
-    const d=await api('audit?limit=100');
-    const entries=(d.recent||[]).reverse();
-    document.getElementById('tab-audit').innerHTML=`
-      <div class="section"><div class="section-header"><h2>Audit Log</h2><span style="color:var(--text2);font-size:13px">${d.total_entries} total entries</span></div>
-      ${entries.length?entries.map(e=>`<div class="audit-entry"><span class="ts">${e.timestamp?.substring(11,19)||''}</span> <span class="user">${e.user}</span> <span class="method">${e.method}</span>${e.tool?' → <strong>'+e.tool+'</strong>':''} <span class="verdict-${e.policy_verdict}">${e.policy_verdict}</span>${e.upstream_latency_ms?' <span style="color:var(--text2)">('+e.upstream_latency_ms+'ms)</span>':''}${e.redacted_pii_count?' <span style="color:var(--orange)">'+e.redacted_pii_count+' redacted</span>':''}${e.error?' <span style="color:var(--red)">'+e.error+'</span>':''}</div>`).join(''):'<div class="empty">No audit entries yet</div>'}
-      </div>`;
-  }catch(e){document.getElementById('tab-audit').innerHTML='<div class="empty">Failed to load audit log</div>';}
-}
-
-async function loadSessions(){
-  try{
-    const d=await api('sessions');
-    document.getElementById('tab-sessions').innerHTML=`
-      <div class="section"><h2>Active Sessions (${d.active})</h2>
-      ${d.sessions.length?`<table><tr><th>Session ID</th><th>Client</th><th>Initialized</th><th>Created</th></tr>
-      ${d.sessions.map(s=>`<tr><td style="font-family:monospace">${s.id}</td><td>${s.client}</td><td>${s.initialized?'<span style="color:var(--green)">Yes</span>':'<span style="color:var(--orange)">Pending</span>'}</td><td>${s.created_at?.substring(0,19)||''}</td></tr>`).join('')}
-      </table>`:'<div class="empty">No active MCP sessions</div>'}
-      </div>`;
-  }catch(e){document.getElementById('tab-sessions').innerHTML='<div class="empty">Failed to load sessions</div>';}
-}
-
-async function reloadConfig(){
-  try{const r=await api('reload',{method:'POST'});toast('Config reloaded: '+r.upstreams+' upstreams, '+r.users+' users');await refresh();}catch(e){toast('Reload failed','error');}
-}
-
-async function rediscover(){
-  try{const r=await api('upstreams/rediscover',{method:'POST'});toast('Discovery complete');await refresh();}catch(e){toast('Discovery failed','error');}
-}
-
-function g(id){return document.getElementById(id).value.trim();}
-function openModal(){document.getElementById('modalBg').classList.add('open');}
-function closeModal(){document.getElementById('modalBg').classList.remove('open');}
-</script>
-</body>
-</html>"""
-
-
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_dashboard():
-    return ADMIN_HTML
