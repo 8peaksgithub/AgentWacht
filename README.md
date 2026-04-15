@@ -35,7 +35,7 @@
 ### Option 1: Python
 
 ```bash
-git clone https://github.com/8peaksgithub/agentwacht.git
+git clone https://github.com/8peaks/agentwacht.git
 cd agentwacht
 pip install -r requirements.txt
 python run_gateway.py
@@ -46,7 +46,7 @@ The gateway starts on `http://localhost:8000`. Open `http://localhost:8000/admin
 ### Option 2: Docker
 
 ```bash
-git clone https://github.com/8peaksgithub/agentwacht.git
+git clone https://github.com/8peaks/agentwacht.git
 cd agentwacht
 docker compose up -d
 ```

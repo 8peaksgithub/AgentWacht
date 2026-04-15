@@ -136,7 +136,7 @@ def main():
 
     logger.info("=" * 60)
     logger.info("AgentWacht — Zero Trust Proxy for MCP")
-    logger.info("https://github.com/8peaksgithub/agentwacht")
+    logger.info("https://github.com/8peaks/agentwacht")
     logger.info("=" * 60)
 
     logger.info("Loading configuration from: %s", args.config)

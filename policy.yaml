@@ -5,7 +5,7 @@
 # It governs: Upstream server connections, User identities, RBAC roles, and
 # granular Zero Trust policies for argument validation and output sanitization.
 #
-# Documentation: https://github.com/8peaksgithub/agentwacht
+# Documentation: https://github.com/8peaks/agentwacht
 # ==========================================================================
 
 # --------------------------------------------------------------------------
